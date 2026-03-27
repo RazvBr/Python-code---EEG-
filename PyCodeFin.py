@@ -2,33 +2,19 @@ from psychopy import visual, core, event, gui, data
 import csv
 import random
 import socket
+import threading
 import time
 from pathlib import Path
 
+# =========================
+# EXPERIMENT SETTINGS
+# =========================
 
-
-# =========================================================
-# SETĂRI GENERALE EXPERIMENT
-# =========================================================
-
-ODDBALL_STIM_DUR = 1.000
-# Durata imaginii în oddball = 1000 ms
-
-ODDBALL_ISI = 2.000
-# Interval inter-trial în oddball = 2000 ms
-
-LPP_FIX_DUR = 0.500
-# Durata crucii de fixare înainte de imagine în LPP = 500 ms
-
-LPP_STIM_DUR = 2.000
-# Durata imaginii în LPP = 2000 ms
-
-PRACTICE_N_TARGETS = 3
-# Numărul de targeturi în practica oddball
-
-ODDBALL_N_TARGETS = 40
-# Numărul de targeturi în oddball real
-# Cu raport 80/20 => 160 standard + 40 target = 200 trialuri total
+# Timings
+ODDBALL_STIM_DUR = 1.000   # 1000 ms
+ODDBALL_ISI = 2.000        # 2000 ms
+LPP_FIX_DUR = 0.500        # 500 ms
+LPP_STIM_DUR = 2.000       # 2000 ms
 
 QUIT_KEYS = ["escape"]
 START_KEY = "space"
@@ -38,39 +24,18 @@ BG_COLOR = "lightgrey"
 TEXT_COLOR = "black"
 FIX_COLOR = "black"
 
-IMAGE_SIZE = (0.9, 0.7)
-# Dimensiunea imaginilor pe ecran (în unități de tip "height")
-
-
-# =========================================================
-# CĂI FIȘIERE
-# =========================================================
-
 BASE_DIR = Path(__file__).parent.resolve()
-# Folderul în care se află scriptul
-
 DATA_DIR = BASE_DIR / "data"
-# Folderul în care salvăm CSV-ul comportamental
-
 STIM_DIR = BASE_DIR / "stimuli"
-# Folderul cu stimuli
 
+# Oddball stimuli
 ODDBALL_STANDARD_IMAGE = STIM_DIR / "oddball" / "standard_checkerboard.jpg"
-# Imaginea standard din oddball
-
 ODDBALL_TARGET_IMAGE = STIM_DIR / "oddball" / "target_checkerboard.jpg"
-# Imaginea target din oddball
 
+# LPP stimuli file
 LPP_FILE = STIM_DIR / "lpp_images.csv"
-# CSV-ul care conține imaginile pentru LPP
 
 DATA_DIR.mkdir(exist_ok=True)
-# Creează folderul data dacă nu există deja
-
-
-# =========================================================
-# METADATA EEG - doar descriptive, scrise în CSV
-# =========================================================
 
 EEG_METADATA = {
     "device": "Unicorn Hybrid Black",
@@ -83,31 +48,22 @@ EEG_METADATA = {
     "roi_lpp": "Pz"
 }
 
-
-# =========================================================
-# RAPORT ODDBALL
-# =========================================================
-
+# Classic oddball ratio
 ODDBALL_STANDARD_PROB = 0.80
 ODDBALL_TARGET_PROB = 0.20
-# Oddball clasic: 80% standard, 20% target
 
+# =========================
+# UDP TRIGGER SETTINGS
+# =========================
 
-# =========================================================
-# SETĂRI UDP PENTRU UNICORN RECORDER
-# =========================================================
-
+# Unicorn Recorder:
+# Receiving triggers via UDP
+# Default example: 127.0.0.1 : 1000
 UDP_IP = "127.0.0.1"
 UDP_PORT = 1000
 
-sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-# Creează socket-ul UDP
-
-endpoint = (UDP_IP, UDP_PORT)
-# Endpoint-ul UDP final
-
-TRIGGER_PULSE_DUR = 0.05
-# Triggerul rămâne activ 50 ms
+udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+udp_endpoint = (UDP_IP, UDP_PORT)
 
 MARKERS = {
     "practice_standard": 1,
@@ -119,52 +75,47 @@ MARKERS = {
     "lpp_negative": 5,
     "fallback": 9,
 }
-# Codurile markerilor
 
-# =========================================================
-# FUNCȚII GENERALE
-# =========================================================
+TRIGGER_RESET_DELAY = 0.03  # 30 ms
+
+
+# =========================
+# HELPER FUNCTIONS
+# =========================
+
+def send_udp_bytes(payload: bytes):
+    udp_sock.sendto(payload, udp_endpoint)
+
+
+def reset_trigger_after(delay_s=TRIGGER_RESET_DELAY):
+    time.sleep(delay_s)
+    send_udp_bytes(b"0")
+
+
+def send_trigger_on_flip(win, code):
+    code_bytes = str(code).encode("ascii")
+
+    def _send_onset_and_schedule_reset():
+        send_udp_bytes(code_bytes)
+        threading.Thread(
+            target=reset_trigger_after,
+            args=(TRIGGER_RESET_DELAY,),
+            daemon=True
+        ).start()
+
+    win.callOnFlip(_send_onset_and_schedule_reset)
+
 
 def cleanup_and_quit(win):
-    """
-    Închide experimentul:
-    - închide socket-ul UDP
-    - închide fereastra PsychoPy
-    - oprește scriptul
-    """
     try:
-        sock.close()
+        udp_sock.close()
     except Exception:
         pass
-
     win.close()
     core.quit()
 
 
-def send_trigger(code):
-    """
-    Trimite triggerul:
-    1) trimite codul ca text codificat în bytes
-    2) așteaptă 50 ms
-    3) trimite 0 pentru reset
-
-    Exemplu:
-    code = 3
-    -> trimite b"3"
-    -> așteaptă 50 ms
-    -> trimite b"0"
-    """
-    code_encoded = str(code).encode()
-    sock.sendto(code_encoded, endpoint)
-    time.sleep(TRIGGER_PULSE_DUR)
-    sock.sendto(b"0", endpoint)
-
-
 def draw_text_and_wait(win, text, wait_for_key=True):
-    """
-    Afișează un ecran cu text.
-    Dacă wait_for_key=True, așteaptă SPACE sau ESCAPE.
-    """
     stim = visual.TextStim(
         win,
         text=text,
@@ -181,11 +132,14 @@ def draw_text_and_wait(win, text, wait_for_key=True):
             cleanup_and_quit(win)
 
 
-def show_instruction_image(win, image_stim, text):
-    """
-    Arată o imagine + text explicativ dedesubt.
-    Folosit pentru a arăta participantului care e standardul și care e targetul.
-    """
+def show_instruction_image(win, image_path, text):
+    image_stim = visual.ImageStim(
+        win,
+        image=str(image_path),
+        size=(0.9, 0.7),
+        units="height",
+        interpolate=True
+    )
     text_stim = visual.TextStim(
         win,
         text=text,
@@ -205,9 +159,6 @@ def show_instruction_image(win, image_stim, text):
 
 
 def show_fixation(win, duration):
-    """
-    Arată crucea de fixare pentru durata specificată.
-    """
     fix = visual.TextStim(win, text="+", color=FIX_COLOR, height=0.08)
     fix.draw()
     win.flip()
@@ -215,20 +166,10 @@ def show_fixation(win, duration):
 
 
 def save_trial(writer, row_dict, fieldnames):
-    """
-    Scrie un rând în CSV-ul comportamental.
-    Dacă vreo coloană lipsește, pune șir gol.
-    """
     writer.writerow({k: row_dict.get(k, "") for k in fieldnames})
 
 
 def load_lpp_csv(csv_path):
-    """
-    Citește fișierul lpp_images.csv și returnează lista de trialuri LPP.
-    Fiecare trial va conține:
-    - image
-    - valence
-    """
     rows = []
     with open(csv_path, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
@@ -240,36 +181,31 @@ def load_lpp_csv(csv_path):
     return rows
 
 
-def validate_lpp_counts(trials):
-    """
-    Verifică dacă lpp_images.csv are exact:
-    - 30 positive
-    - 30 neutral
-    - 30 negative
-    Dacă nu, dă eroare și oprește experimentul.
-    """
-    counts = {"positive": 0, "neutral": 0, "negative": 0}
+def run_image_for_duration(win, image_stim, duration, response_key=None):
+    clock = core.Clock()
+    event.clearEvents(eventType="keyboard")
 
-    for t in trials:
-        if t["valence"] in counts:
-            counts[t["valence"]] += 1
+    pressed = 0
+    rt = ""
 
-    expected = {"positive": 30, "neutral": 30, "negative": 30}
-    if counts != expected:
-        raise ValueError(
-            f"lpp_images.csv trebuie să conțină exact 30 positive, 30 neutral, 30 negative. "
-            f"Acum are: {counts}"
-        )
+    while clock.getTime() < duration:
+        image_stim.draw()
+        win.flip()
+
+        if response_key is not None:
+            keys = event.getKeys(keyList=[response_key] + QUIT_KEYS, timeStamped=clock)
+            if keys:
+                for key, key_rt in keys:
+                    if key in QUIT_KEYS:
+                        cleanup_and_quit(win)
+                    if key == response_key and pressed == 0:
+                        pressed = 1
+                        rt = key_rt
+
+    return pressed, rt
 
 
-def build_oddball_trials(n_targets, standard_image_path, target_image_path, rng):
-    """
-    Construiește lista de trialuri pentru oddball:
-    - standard
-    - target
-
-    Se calculează automat câte standarde trebuie pentru raportul 80/20.
-    """
+def build_oddball_trials(n_targets, standard_image_path, target_image_path):
     standard_n = round(n_targets * (ODDBALL_STANDARD_PROB / ODDBALL_TARGET_PROB))
     trials = []
 
@@ -287,123 +223,35 @@ def build_oddball_trials(n_targets, standard_image_path, target_image_path, rng)
             "correct_response": 1
         })
 
-    rng.shuffle(trials)
+    random.shuffle(trials)
     return trials
 
 
-def prepare_all_trials(participant_code):
-    """
-    Pregătește TOATE trialurile înainte să înceapă experimentul:
-    - practice oddball
-    - oddball real
-    - LPP
+def validate_lpp_counts(trials):
+    counts = {"positive": 0, "neutral": 0, "negative": 0}
+    for t in trials:
+        if t["valence"] in counts:
+            counts[t["valence"]] += 1
 
-    Folosim participant_code ca seed pentru randomizare reproductibilă.
-    """
-    rng = random.Random(participant_code)
-
-    practice_trials = build_oddball_trials(
-        n_targets=PRACTICE_N_TARGETS,
-        standard_image_path=ODDBALL_STANDARD_IMAGE,
-        target_image_path=ODDBALL_TARGET_IMAGE,
-        rng=rng
-    )
-
-    oddball_trials = build_oddball_trials(
-        n_targets=ODDBALL_N_TARGETS,
-        standard_image_path=ODDBALL_STANDARD_IMAGE,
-        target_image_path=ODDBALL_TARGET_IMAGE,
-        rng=rng
-    )
-
-    lpp_trials = load_lpp_csv(LPP_FILE)
-    validate_lpp_counts(lpp_trials)
-    rng.shuffle(lpp_trials)
-
-    return practice_trials, oddball_trials, lpp_trials
-
-
-def preload_images_from_trials(win, practice_trials, oddball_trials, lpp_trials):
-    """
-    Încarcă toate imaginile în memorie înainte de task.
-    Asta reduce lagul produs de citirea din disc în timpul experimentului.
-    """
-    image_cache = {}
-    all_paths = set()
-
-    all_paths.add(str(ODDBALL_STANDARD_IMAGE))
-    all_paths.add(str(ODDBALL_TARGET_IMAGE))
-
-    for t in practice_trials:
-        all_paths.add(t["image"])
-
-    for t in oddball_trials:
-        all_paths.add(t["image"])
-
-    for t in lpp_trials:
-        all_paths.add(t["image"])
-
-    for path in all_paths:
-        image_cache[path] = visual.ImageStim(
-            win,
-            image=path,
-            size=IMAGE_SIZE,
-            units="height",
-            interpolate=True
+    expected = {"positive": 30, "neutral": 30, "negative": 30}
+    if counts != expected:
+        raise ValueError(
+            f"lpp_images.csv trebuie să conțină exact 30 positive, 30 neutral, 30 negative. "
+            f"Acum are: {counts}"
         )
 
-    return image_cache
 
+# =========================
+# PRACTICE
+# =========================
 
-def run_stimulus_for_duration(win, image_stim, duration, response_key=None, marker_code=None):
-    """
-    Afișează un stimul (imagine) pentru o durată fixă.
-    Opțional:
-    - trimite markerul
-    - colectează răspunsul participantului
+def run_oddball_practice(win, writer, fieldnames, participant_code, n_targets=3):
+    practice_trials = build_oddball_trials(
+        n_targets=n_targets,
+        standard_image_path=ODDBALL_STANDARD_IMAGE,
+        target_image_path=ODDBALL_TARGET_IMAGE
+    )
 
-    Important:
-    aici markerul este trimis imediat după primul flip al imaginii,
-    pentru a reproduce logica care ți-a mers în Unicorn Recorder.
-    """
-    event.clearEvents(eventType="keyboard")
-    clock = core.Clock()
-
-    # PRIMUL FRAME AL IMAGINII
-    image_stim.draw()
-    win.flip()
-    # imaginea apare pe ecran
-
-    if marker_code is not None:
-        send_trigger(marker_code)
-        # imediat după apariția imaginii, trimitem markerul
-        
-
-    pressed = 0
-    rt = ""
-
-    while clock.getTime() < duration:
-        if response_key is not None:
-            keys = event.getKeys(keyList=[response_key] + QUIT_KEYS, timeStamped=clock)
-            if keys:
-                for key, key_rt in keys:
-                    if key in QUIT_KEYS:
-                        cleanup_and_quit(win)
-                    if key == response_key and pressed == 0:
-                        pressed = 1
-                        rt = key_rt
-
-        image_stim.draw()
-        win.flip()
-
-    return pressed, rt
-
-
-# =========================================================
-# PRACTICĂ ODDBALL
-# =========================================================
-
-def run_oddball_practice(win, writer, fieldnames, participant_code, practice_trials, image_cache):
     draw_text_and_wait(
         win,
         "Exersare\n\n"
@@ -414,21 +262,26 @@ def run_oddball_practice(win, writer, fieldnames, participant_code, practice_tri
         "Apăsați SPACE pentru a începe exercițiul."
     )
 
+    image_stim = visual.ImageStim(
+        win,
+        image=None,
+        size=(0.9, 0.7),
+        units="height",
+        interpolate=True
+    )
+
     for trial_index, trial in enumerate(practice_trials, start=1):
-        image_stim = image_cache[trial["image"]]
+        image_stim.image = trial["image"]
 
         trigger_code = (
             MARKERS["practice_standard"]
             if trial["trial_type"] == "standard"
             else MARKERS["practice_target"]
         )
+        send_trigger_on_flip(win, trigger_code)
 
-        pressed, rt = run_stimulus_for_duration(
-            win=win,
-            image_stim=image_stim,
-            duration=ODDBALL_STIM_DUR,
-            response_key=TARGET_KEY,
-            marker_code=trigger_code
+        pressed, rt = run_image_for_duration(
+            win, image_stim, ODDBALL_STIM_DUR, response_key=TARGET_KEY
         )
 
         if trial["correct_response"] == 1:
@@ -488,11 +341,17 @@ def run_oddball_practice(win, writer, fieldnames, participant_code, practice_tri
     )
 
 
-# =========================================================
-# ODDBALL REAL
-# =========================================================
+# =========================
+# TASKS
+# =========================
 
-def run_oddball_block(win, writer, fieldnames, participant_code, oddball_trials, practice_trials, image_cache):
+def run_oddball_block(win, writer, fieldnames, participant_code, n_targets=40):
+    trials = build_oddball_trials(
+        n_targets=n_targets,
+        standard_image_path=ODDBALL_STANDARD_IMAGE,
+        target_image_path=ODDBALL_TARGET_IMAGE
+    )
+
     draw_text_and_wait(
         win,
         "Partea 1\n\n"
@@ -503,7 +362,7 @@ def run_oddball_block(win, writer, fieldnames, participant_code, oddball_trials,
 
     show_instruction_image(
         win,
-        image_cache[str(ODDBALL_STANDARD_IMAGE)],
+        ODDBALL_STANDARD_IMAGE,
         "Aceasta este imaginea care apare frecvent.\n"
         "Când vedeți această imagine, NU apăsați nimic.\n\n"
         "Apăsați SPACE pentru a continua."
@@ -511,7 +370,7 @@ def run_oddball_block(win, writer, fieldnames, participant_code, oddball_trials,
 
     show_instruction_image(
         win,
-        image_cache[str(ODDBALL_TARGET_IMAGE)],
+        ODDBALL_TARGET_IMAGE,
         "Aceasta este imaginea care apare rar.\n"
         "Când vedeți această imagine, apăsați tasta SPACE cât mai repede.\n\n"
         "Apăsați SPACE pentru a continua."
@@ -530,8 +389,7 @@ def run_oddball_block(win, writer, fieldnames, participant_code, oddball_trials,
         writer=writer,
         fieldnames=fieldnames,
         participant_code=participant_code,
-        practice_trials=practice_trials,
-        image_cache=image_cache
+        n_targets=3
     )
 
     draw_text_and_wait(
@@ -541,21 +399,26 @@ def run_oddball_block(win, writer, fieldnames, participant_code, oddball_trials,
         "Apăsați SPACE pentru a începe."
     )
 
-    for trial_index, trial in enumerate(oddball_trials, start=1):
-        image_stim = image_cache[trial["image"]]
+    image_stim = visual.ImageStim(
+        win,
+        image=None,
+        size=(0.9, 0.7),
+        units="height",
+        interpolate=True
+    )
+
+    for trial_index, trial in enumerate(trials, start=1):
+        image_stim.image = trial["image"]
 
         trigger_code = (
             MARKERS["oddball_standard"]
             if trial["trial_type"] == "standard"
             else MARKERS["oddball_target"]
         )
+        send_trigger_on_flip(win, trigger_code)
 
-        pressed, rt = run_stimulus_for_duration(
-            win=win,
-            image_stim=image_stim,
-            duration=ODDBALL_STIM_DUR,
-            response_key=TARGET_KEY,
-            marker_code=trigger_code
+        pressed, rt = run_image_for_duration(
+            win, image_stim, ODDBALL_STIM_DUR, response_key=TARGET_KEY
         )
 
         if trial["correct_response"] == 1:
@@ -590,11 +453,11 @@ def run_oddball_block(win, writer, fieldnames, participant_code, oddball_trials,
         }, fieldnames)
 
 
-# =========================================================
-# LPP
-# =========================================================
+def run_lpp_block(win, writer, fieldnames, participant_code, csv_path):
+    trials = load_lpp_csv(csv_path)
+    validate_lpp_counts(trials)
+    random.shuffle(trials)
 
-def run_lpp_block(win, writer, fieldnames, participant_code, lpp_trials, image_cache):
     draw_text_and_wait(
         win,
         "Partea 2\n\n"
@@ -609,10 +472,18 @@ def run_lpp_block(win, writer, fieldnames, participant_code, lpp_trials, image_c
         "Apăsați SPACE pentru a începe."
     )
 
-    for trial_index, trial in enumerate(lpp_trials, start=1):
+    image_stim = visual.ImageStim(
+        win,
+        image=None,
+        size=(0.9, 0.7),
+        units="height",
+        interpolate=True
+    )
+
+    for trial_index, trial in enumerate(trials, start=1):
         show_fixation(win, LPP_FIX_DUR)
 
-        image_stim = image_cache[trial["image"]]
+        image_stim.image = trial["image"]
 
         trigger_code = {
             "positive": MARKERS["lpp_positive"],
@@ -620,13 +491,8 @@ def run_lpp_block(win, writer, fieldnames, participant_code, lpp_trials, image_c
             "negative": MARKERS["lpp_negative"]
         }.get(trial["valence"], MARKERS["fallback"])
 
-        run_stimulus_for_duration(
-            win=win,
-            image_stim=image_stim,
-            duration=LPP_STIM_DUR,
-            response_key=None,
-            marker_code=trigger_code
-        )
+        send_trigger_on_flip(win, trigger_code)
+        run_image_for_duration(win, image_stim, LPP_STIM_DUR, response_key=None)
 
         save_trial(writer, {
             "participant_code": participant_code,
@@ -653,16 +519,15 @@ def run_lpp_block(win, writer, fieldnames, participant_code, lpp_trials, image_c
         }, fieldnames)
 
 
-# =========================================================
+# =========================
 # MAIN
-# =========================================================
+# =========================
 
 def main():
     exp_info = {
         "participant_code": "",
         "session": "1"
     }
-
     dlg = gui.DlgFromDict(exp_info, title="ERP Image Task")
     if not dlg.OK:
         return
@@ -703,13 +568,6 @@ def main():
         units="height"
     )
 
-    win.flip()
-    # un flip de încălzire al ferestrei
-
-    # PREGĂTIM TOTUL ÎNAINTE DE TASK
-    practice_trials, oddball_trials, lpp_trials = prepare_all_trials(participant_code)
-    image_cache = preload_images_from_trials(win, practice_trials, oddball_trials, lpp_trials)
-
     with open(outfile, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
@@ -735,9 +593,7 @@ def main():
             writer=writer,
             fieldnames=fieldnames,
             participant_code=participant_code,
-            oddball_trials=oddball_trials,
-            practice_trials=practice_trials,
-            image_cache=image_cache
+            n_targets=40
         )
 
         draw_text_and_wait(
@@ -752,8 +608,7 @@ def main():
             writer=writer,
             fieldnames=fieldnames,
             participant_code=participant_code,
-            lpp_trials=lpp_trials,
-            image_cache=image_cache
+            csv_path=LPP_FILE
         )
 
         draw_text_and_wait(
@@ -764,6 +619,10 @@ def main():
         )
         core.wait(2.0)
 
+    try:
+        udp_sock.close()
+    except Exception:
+        pass
     cleanup_and_quit(win)
 
 
